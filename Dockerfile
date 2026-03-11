@@ -1,17 +1,15 @@
-FROM python:3.11
-
-ENV PYTHONUNBUFFERED=1
+FROM mcr.microsoft.com/playwright/python:v1.40.0-jammy
 
 WORKDIR /app
 
-# Copy requirements
+ENV PYTHONUNBUFFERED=1
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Playwright browsers
-RUN playwright install --with-deps chromium
-
-# Copy app
 COPY . .
+
+EXPOSE 8080
 
 CMD ["python", "bot.py"]
