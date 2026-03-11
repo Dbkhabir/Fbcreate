@@ -10,6 +10,7 @@ import random
 import asyncio
 from typing import Dict, Any
 from datetime import datetime
+from threading import Thread
 
 from dotenv import load_dotenv
 from telegram import Update
@@ -23,6 +24,7 @@ from telegram.ext import (
 )
 
 from playwright.async_api import async_playwright, Browser, Page, Playwright
+from flask import Flask
 
 # Load environment variables
 load_dotenv()
@@ -39,6 +41,22 @@ WAITING_PHONE, WAITING_OTP = range(2)
 
 # File to store created accounts
 ACCOUNTS_FILE = 'accounts.json'
+
+# Flask app for Railway (keeps the service alive)
+flask_app = Flask(__name__)
+
+@flask_app.route('/')
+def home():
+    return "✅ Facebook Account Creator Bot is running!"
+
+@flask_app.route('/health')
+def health():
+    return {"status": "healthy", "bot": "active"}
+
+def run_flask():
+    """Run Flask server in background."""
+    port = int(os.environ.get('PORT', 8080))
+    flask_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
 
 class FacebookAccountCreator:
@@ -73,6 +91,8 @@ class FacebookAccountCreator:
                 '--disable-blink-features=AutomationControlled',
                 '--disable-web-security',
                 '--disable-features=IsolateOrigins,site-per-process',
+                '--disable-gpu',
+                '--no-zygote',
             ]
         )
         
@@ -82,8 +102,6 @@ class FacebookAccountCreator:
             viewport={'width': random.randint(1366, 1920), 'height': random.randint(768, 1080)},
             locale='en-US',
             timezone_id='America/New_York',
-            geolocation={'longitude': -74.0060, 'latitude': 40.7128},
-            permissions=['geolocation'],
         )
         
         self.page = await context.new_page()
@@ -117,7 +135,7 @@ class FacebookAccountCreator:
             selector: CSS selector for the input element
             text: Text to type
         """
-        await self.page.fill(selector, '')  # Clear first
+        await self.page.fill(selector, '')
         for char in text:
             await self.page.type(selector, char, delay=random.randint(50, 150))
             
@@ -132,15 +150,12 @@ class FacebookAccountCreator:
         last_names = ['Smith', 'Johnson', 'Williams', 'Brown', 'Jones', 'Garcia', 'Miller', 'Davis',
                      'Rodriguez', 'Martinez', 'Hernandez', 'Lopez', 'Gonzalez', 'Wilson', 'Anderson', 'Thomas']
         
-        # Random birthday (18-35 years old)
         birth_year = random.randint(1989, 2005)
         birth_month = random.randint(1, 12)
         birth_day = random.randint(1, 28)
         
-        # Random gender
         gender = random.choice(['male', 'female'])
         
-        # Random strong password
         password = f"Fb{random.randint(100000, 999999)}!@{random.choice(['#', '$', '%'])}"
         
         return {
@@ -163,30 +178,25 @@ class FacebookAccountCreator:
         try:
             await self.setup_browser()
             
-            # Generate account data
             self.account_data = self.generate_account_data()
             
             logger.info("Navigating to Facebook signup page...")
             await self.page.goto('https://www.facebook.com/reg/', wait_until='domcontentloaded', timeout=30000)
             await self.random_delay(2, 4)
             
-            # Fill first name
             logger.info("Filling first name...")
             await self.page.wait_for_selector('input[name="firstname"]', timeout=10000)
             await self.human_type('input[name="firstname"]', self.account_data['first_name'])
             await self.random_delay(0.5, 1.0)
             
-            # Fill last name
             logger.info("Filling last name...")
             await self.human_type('input[name="lastname"]', self.account_data['last_name'])
             await self.random_delay(0.5, 1.0)
             
-            # Fill password
             logger.info("Filling password...")
             await self.human_type('input[name="reg_passwd__"]', self.account_data['password'])
             await self.random_delay(0.5, 1.0)
             
-            # Fill birthday
             logger.info("Filling birthday...")
             await self.page.select_option('select[name="birthday_day"]', str(self.account_data['birth_day']))
             await self.random_delay(0.3, 0.7)
@@ -197,13 +207,12 @@ class FacebookAccountCreator:
             await self.page.select_option('select[name="birthday_year"]', str(self.account_data['birth_year']))
             await self.random_delay(0.5, 1.0)
             
-            # Select gender
             logger.info("Selecting gender...")
             gender_value = '2' if self.account_data['gender'] == 'male' else '1'
             await self.page.click(f'input[type="radio"][value="{gender_value}"]')
             await self.random_delay(0.5, 1.0)
             
-            logger.info("Initial fields filled successfully. Ready for phone number.")
+            logger.info("Initial fields filled successfully.")
             return self.account_data
             
         except Exception as e:
@@ -221,12 +230,10 @@ class FacebookAccountCreator:
         try:
             logger.info(f"Entering phone number: {phone}")
             
-            # Find and fill phone number input
             await self.page.wait_for_selector('input[name="reg_email__"]', timeout=10000)
             await self.human_type('input[name="reg_email__"]', phone)
             await self.random_delay(0.5, 1.0)
             
-            # Check if confirmation field exists
             try:
                 confirmation_field = await self.page.query_selector('input[name="reg_email_confirmation__"]')
                 if confirmation_field:
@@ -234,16 +241,15 @@ class FacebookAccountCreator:
                     await self.human_type('input[name="reg_email_confirmation__"]', phone)
                     await self.random_delay(0.5, 1.0)
             except Exception as e:
-                logger.info(f"No confirmation field found or error: {e}")
+                logger.info(f"No confirmation field: {e}")
             
-            # Click Sign Up button
             logger.info("Clicking Sign Up button...")
             await self.page.click('button[name="websubmit"]')
             
             self.account_data['phone'] = phone
             await self.random_delay(3, 5)
             
-            logger.info("Phone number submitted successfully. Waiting for OTP...")
+            logger.info("Phone number submitted successfully.")
             
         except Exception as e:
             logger.error(f"Error entering phone number: {e}")
@@ -262,23 +268,18 @@ class FacebookAccountCreator:
         try:
             logger.info(f"Entering OTP: {otp}")
             
-            # Wait for OTP input field
             await self.page.wait_for_selector('input[name="code"]', timeout=20000)
             await self.random_delay(1, 2)
             
-            # Enter OTP
             await self.human_type('input[name="code"]', otp)
             await self.random_delay(0.5, 1.0)
             
-            # Click continue/confirm button
             await self.page.click('button[type="submit"]')
             await self.random_delay(3, 5)
             
-            # Check if signup was successful
             current_url = self.page.url
             logger.info(f"Current URL after OTP: {current_url}")
             
-            # Check for success indicators
             if 'facebook.com' in current_url and '/reg/' not in current_url:
                 logger.info("✅ Account creation successful!")
                 self.account_data['created_at'] = datetime.now().isoformat()
@@ -286,16 +287,7 @@ class FacebookAccountCreator:
                 self.account_data['profile_url'] = current_url
                 return True
             else:
-                # Check if we're still on verification page
-                try:
-                    error_element = await self.page.query_selector('[role="alert"]')
-                    if error_element:
-                        error_text = await error_element.inner_text()
-                        logger.warning(f"Error message found: {error_text}")
-                except:
-                    pass
-                
-                logger.warning("Account creation may have failed or needs additional verification.")
+                logger.warning("Account creation may have failed.")
                 self.account_data['status'] = 'uncertain'
                 self.account_data['final_url'] = current_url
                 return False
@@ -322,24 +314,16 @@ class FacebookAccountCreator:
 
 
 def save_account(account_data: Dict[str, Any]):
-    """
-    Save account data to JSON file.
-    
-    Args:
-        account_data: Account information to save
-    """
+    """Save account data to JSON file."""
     try:
-        # Load existing accounts
         if os.path.exists(ACCOUNTS_FILE):
             with open(ACCOUNTS_FILE, 'r', encoding='utf-8') as f:
                 accounts = json.load(f)
         else:
             accounts = []
         
-        # Add new account
         accounts.append(account_data)
         
-        # Save to file
         with open(ACCOUNTS_FILE, 'w', encoding='utf-8') as f:
             json.dump(accounts, f, indent=2, ensure_ascii=False)
         
@@ -357,20 +341,20 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command."""
     welcome_message = """
 👋 **Welcome to Facebook Account Creator Bot!** 
-This bot helps you create Facebook accounts automatically using Playwright.
- **Commands:** • /start - Show this welcome message
-• /create - Start creating a new Facebook account
-• /help - Get detailed help and instructions
-• /cancel - Cancel current operation
- **Quick Start:** 1. Send /create to begin
-2. Bot will auto-fill name, birthday, gender, password
-3. You provide your phone number
-4. You provide the OTP code from SMS
-5. Done! Account is created and saved
+This bot helps you create Facebook accounts automatically.
+ **Commands:** • /start - Show this message
+• /create - Create new Facebook account
+• /help - Get help
+• /cancel - Cancel operation
+ **Quick Start:** 1. Send /create
+2. Bot fills name, birthday, password
+3. You provide phone number
+4. You provide OTP code
+5. Done!
 
-⚠️ **Important:** Use responsibly and follow Facebook's Terms of Service.
+⚠️ Use responsibly!
 
-Ready? Send /create to start! 🚀
+Ready? Send /create 🚀
     """
     await update.message.reply_text(welcome_message, parse_mode='Markdown')
 
@@ -378,111 +362,67 @@ Ready? Send /create to start! 🚀
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /help command."""
     help_text = """
-📖 **Facebook Account Creator Bot - Detailed Help**  **How It Works:** 
-1️⃣ **Start Account Creation**    • Send /create command
-   • Bot opens Facebook signup page
-   • Automatically fills: Name, Birthday, Gender, Password
-
-2️⃣ **Provide Phone Number**    • Bot asks for your phone number
-   • Format: +[country_code][number]
-   • Example: +8801712345678 (Bangladesh)
-   • Example: +12025551234 (USA)
-
-3️⃣ **Enter OTP Code**    • Facebook sends SMS with verification code
-   • Send that code to the bot
-   • Bot enters it and completes signup
-
-4️⃣ **Get Account Details**    • Bot sends you all account info
-   • Password, phone, birthday, etc.
-   • Also saved to accounts.json file
- **Tips for Success:** ✅ Use a real, active phone number
-✅ Make sure you can receive SMS
-✅ Enter OTP quickly (before it expires)
-✅ Don't create too many accounts from same IP
- **Common Issues:** 
-❌ **"Phone number already used"**    → That number has a Facebook account already
-   → Try a different phone number
-
-❌ **"Wrong OTP code"**    → Double-check the code from SMS
-   → Make sure it hasn't expired (usually 10 min)
-   → Start over with /create
-
-❌ **"Bot not responding"**    → Check bot is running
-   → Check internet connection
-   → Try /cancel then /create again
- **Security Notes:** 🔒 Your account data is saved locally
-🔒 Bot doesn't store your data on external servers
-🔒 Keep your accounts.json file secure
- **Commands:** /start - Welcome message
-/create - Create new account
-/cancel - Cancel current operation
-/help - This help message
-
-Need more help? Contact the bot administrator.
+📖 **Help - Facebook Account Creator**  **Steps:** 1️⃣ /create - Start
+2️⃣ Bot fills form automatically
+3️⃣ Send phone: +8801712345678
+4️⃣ Facebook sends OTP via SMS
+5️⃣ Send OTP: 123456
+6️⃣ Account created!
+ **Tips:** ✅ Use valid phone number
+✅ Number must receive SMS
+✅ Enter OTP quickly
+ **Troubleshooting:** ❌ Phone already used → Try different number
+❌ Wrong OTP → Check SMS again
+❌ Bot stuck → Use /cancel then /create
+ **Commands:** /start, /create, /cancel, /help
     """
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
 
 async def create_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /create command - start account creation."""
+    """Handle /create command."""
     
-    # Check if there's already an ongoing creation
     if 'creator' in context.user_data:
         await update.message.reply_text(
-            "⚠️ You already have an ongoing account creation.\n"
-            "Please complete it or use /cancel first."
+            "⚠️ Already creating an account.\n"
+            "Use /cancel first."
         )
         return ConversationHandler.END
     
     await update.message.reply_text(
-        "🚀 **Starting Facebook Account Creation...** \n\n"
-        "⏳ Please wait while I:\n"
-        "• Open Facebook signup page\n"
-        "• Fill in random name and details\n"
-        "• Prepare for your phone number\n\n"
-        "This may take 10-20 seconds...",
+        "🚀 **Starting Account Creation...** \n\n"
+        "⏳ Please wait 10-20 seconds...",
         parse_mode='Markdown'
     )
     
     try:
-        # Get headless setting from environment
         headless = os.getenv('HEADLESS', 'true').lower() == 'true'
         
-        # Initialize creator
         creator = FacebookAccountCreator(headless=headless)
         context.user_data['creator'] = creator
         
-        # Start signup process
         account_data = await creator.start_signup()
         
-        # Show generated info to user
         info_message = f"""
-✅ **Basic Information Filled Successfully!**  **Generated Account Details:** ━━━━━━━━━━━━━━━━━━━━━━
+✅ **Basic Info Filled!**  **Details:** ━━━━━━━━━━━━━━━━━━━━
 👤 **Name:** {account_data['first_name']} {account_data['last_name']}
 🎂 **Birthday:** {account_data['birth_day']}/{account_data['birth_month']}/{account_data['birth_year']}
 ⚧️ **Gender:** {account_data['gender'].capitalize()}
 🔐 **Password:** `{account_data['password']}`
-━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━
 
-📱 **Next Step: Phone Number** 
-Please send your phone number in international format:
-• Format: +[country_code][number]
-• Example: `+8801712345678`
-• Example: `+12025551234`
+📱 **Next: Send your phone number** 
+Format: `+8801712345678`
 
-⚠️ Make sure:
-✓ Number can receive SMS
-✓ Number is not already used on Facebook
-✓ You have access to this number now
+⚠️ Number must receive SMS!
         """
         await update.message.reply_text(info_message, parse_mode='Markdown')
         
         return WAITING_PHONE
         
     except Exception as e:
-        logger.error(f"Error in create_command: {e}", exc_info=True)
+        logger.error(f"Error: {e}", exc_info=True)
         
-        # Cleanup if error
         if 'creator' in context.user_data:
             try:
                 await context.user_data['creator'].cleanup()
@@ -491,108 +431,67 @@ Please send your phone number in international format:
             del context.user_data['creator']
         
         await update.message.reply_text(
-            f"❌ **Error Starting Account Creation** \n\n"
-            f"Error: `{str(e)}`\n\n"
-            f"Possible reasons:\n"
-            f"• Browser failed to start\n"
-            f"• Network connection issue\n"
-            f"• Facebook page didn't load\n\n"
-            f"Please try again with /create",
+            f"❌ **Error** \n\n`{str(e)}`\n\nTry /create again",
             parse_mode='Markdown'
         )
         return ConversationHandler.END
 
 
 async def receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle phone number input from user."""
+    """Handle phone number input."""
     phone = update.message.text.strip()
     
-    # Basic validation
     if not phone.startswith('+'):
         await update.message.reply_text(
-            "❌ **Invalid Phone Number Format** \n\n"
-            "Phone number must start with '+' and country code.\n\n"
-            " **Examples:** \n"
-            "• `+8801712345678` (Bangladesh)\n"
-            "• `+12025551234` (USA)\n"
-            "• `+447911123456` (UK)\n\n"
-            "Please send a valid phone number:",
+            "❌ **Invalid Format** \n\n"
+            "Must start with '+'\n"
+            "Example: `+8801712345678`",
             parse_mode='Markdown'
         )
         return WAITING_PHONE
     
-    # Remove spaces and check if rest is numeric
     phone_digits = phone[1:].replace(' ', '').replace('-', '')
     if not phone_digits.isdigit() or len(phone_digits) < 8:
         await update.message.reply_text(
-            "❌ **Invalid Phone Number** \n\n"
-            "Phone number format is incorrect.\n"
-            "Please send a valid phone number with country code.\n\n"
+            "❌ Invalid phone number.\n"
             "Example: `+8801712345678`",
             parse_mode='Markdown'
         )
         return WAITING_PHONE
     
     await update.message.reply_text(
-        f"📱 **Submitting Phone Number...** \n\n"
-        f"Phone: `{phone}`\n"
-        f"⏳ Please wait 5-10 seconds...",
+        f"📱 Submitting: `{phone}`\n⏳ Wait...",
         parse_mode='Markdown'
     )
     
     try:
         creator = context.user_data.get('creator')
         if not creator:
-            await update.message.reply_text(
-                "❌ Session expired. Please start over with /create"
-            )
+            await update.message.reply_text("❌ Session expired. Use /create")
             return ConversationHandler.END
         
-        # Enter phone number
         await creator.enter_phone_number(phone)
         
         await update.message.reply_text(
-            "✅ **Phone Number Submitted Successfully!** \n\n"
-            "📬 **Facebook is sending you an OTP code via SMS** \n\n"
-            "⏰ The code should arrive within 1-2 minutes.\n\n"
-            "📝 **When you receive the code:** \n"
-            "• It will be 4-6 digits\n"
-            "• Send it here immediately\n"
-            "• Don't add any text, just the numbers\n\n"
-            "Example: `123456`\n\n"
-            "Waiting for your OTP code... ⏳",
+            "✅ **Phone Submitted!** \n\n"
+            "📬 Facebook is sending OTP via SMS\n\n"
+            "⏰ Should arrive in 1-2 minutes\n\n"
+            "📝 Send the code when received\n"
+            "Example: `123456`",
             parse_mode='Markdown'
         )
         
         return WAITING_OTP
         
     except Exception as e:
-        logger.error(f"Error entering phone: {e}", exc_info=True)
-        
-        error_msg = str(e).lower()
-        
-        if 'already' in error_msg or 'exists' in error_msg:
-            reason = "This phone number is already registered on Facebook"
-        elif 'invalid' in error_msg:
-            reason = "Facebook rejected this phone number (invalid format or country)"
-        elif 'timeout' in error_msg:
-            reason = "Page took too long to respond"
-        else:
-            reason = "Unknown error occurred"
+        logger.error(f"Error: {e}", exc_info=True)
         
         await update.message.reply_text(
-            f"❌ **Failed to Submit Phone Number** \n\n"
-            f" **Reason:** {reason}\n\n"
-            f" **Error Details:** `{str(e)}`\n\n"
-            f" **What to do:** \n"
-            f"• Try a different phone number\n"
-            f"• Make sure number format is correct\n"
-            f"• Check if number is already used on Facebook\n\n"
-            f"Use /create to try again with a different number.",
+            f"❌ **Failed** \n\n`{str(e)}`\n\n"
+            f"Try different number with /create",
             parse_mode='Markdown'
         )
         
-        # Cleanup
         if creator:
             try:
                 await creator.cleanup()
@@ -606,116 +505,79 @@ async def receive_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def receive_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle OTP code input from user."""
+    """Handle OTP input."""
     otp = update.message.text.strip()
     
-    # Basic validation
     if not otp.isdigit():
         await update.message.reply_text(
-            "❌ **Invalid OTP Format** \n\n"
-            "OTP must contain only numbers.\n"
-            "Please send just the numeric code.\n\n"
-            "Example: `123456`",
+            "❌ OTP must be numbers only.\nExample: `123456`",
             parse_mode='Markdown'
         )
         return WAITING_OTP
     
     if len(otp) < 4 or len(otp) > 8:
         await update.message.reply_text(
-            "❌ **Invalid OTP Length** \n\n"
-            "OTP is usually 4-6 digits.\n"
-            "Please check and send the correct code.\n\n"
-            "Example: `123456`",
-            parse_mode='Markdown'
+            "❌ OTP usually 4-6 digits.\nCheck and resend.",
         )
         return WAITING_OTP
     
     await update.message.reply_text(
-        f"🔐 **Verifying OTP Code...** \n\n"
-        f"Code: `{otp}`\n"
-        f"⏳ Please wait 5-10 seconds...",
+        f"🔐 Verifying: `{otp}`\n⏳ Wait...",
         parse_mode='Markdown'
     )
     
     try:
         creator = context.user_data.get('creator')
         if not creator:
-            await update.message.reply_text(
-                "❌ Session expired. Please start over with /create"
-            )
+            await update.message.reply_text("❌ Session expired. Use /create")
             return ConversationHandler.END
         
-        # Enter OTP and check result
         success = await creator.enter_otp(otp)
         
         if success:
-            # Save account to file
             save_account(creator.account_data)
             
-            # Send success message with full details
             success_message = f"""
-🎉 **ACCOUNT CREATED SUCCESSFULLY!** 🎉
- **Your New Facebook Account:** ━━━━━━━━━━━━━━━━━━━━━━
+🎉 **ACCOUNT CREATED!** 🎉
+ **Your Facebook Account:** ━━━━━━━━━━━━━━━━━━━━
 👤 **Name:** {creator.account_data['first_name']} {creator.account_data['last_name']}
 📱 **Phone:** `{creator.account_data['phone']}`
 🔐 **Password:** `{creator.account_data['password']}`
 🎂 **Birthday:** {creator.account_data['birth_day']}/{creator.account_data['birth_month']}/{creator.account_data['birth_year']}
 ⚧️ **Gender:** {creator.account_data['gender'].capitalize()}
-📅 **Created:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━
 
-✅ **Account saved to:** `accounts.json`
-
-🔒 **Security Reminder:** • Change password after first login
-• Enable two-factor authentication
-• Keep credentials safe
- **To create another account:** Send /create command again
-
-Enjoy your new Facebook account! 🚀
+✅ Saved to accounts.json
+ **Create another?** Send /create
             """
             await update.message.reply_text(success_message, parse_mode='Markdown')
             
         else:
-            # Failed but no exception - likely wrong OTP or other FB error
             await update.message.reply_text(
-                "❌ **Account Creation Failed** \n\n"
-                " **Possible Reasons:** \n"
-                "• Wrong OTP code\n"
-                "• OTP expired (usually valid for 10 minutes)\n"
-                "• Facebook detected suspicious activity\n"
-                "• Additional verification required\n\n"
-                " **What to do:** \n"
-                "• Use /create to try again\n"
-                "• Try with a different phone number\n"
-                "• Consider using a VPN if blocked\n\n"
-                "Use /create to try again.",
+                "❌ **Failed** \n\n"
+                "Reasons:\n"
+                "• Wrong OTP\n"
+                "• OTP expired\n"
+                "• FB detected bot\n\n"
+                "Use /create to try again",
                 parse_mode='Markdown'
             )
         
-        # Cleanup browser
         await creator.cleanup()
         
-        # Remove creator from context
         if 'creator' in context.user_data:
             del context.user_data['creator']
         
         return ConversationHandler.END
         
     except Exception as e:
-        logger.error(f"Error entering OTP: {e}", exc_info=True)
+        logger.error(f"Error: {e}", exc_info=True)
         
         await update.message.reply_text(
-            f"❌ **Error During Verification** \n\n"
-            f" **Error:** `{str(e)}`\n\n"
-            f" **Possible reasons:** \n"
-            f"• Network connection lost\n"
-            f"• Facebook page crashed\n"
-            f"• Browser error\n\n"
-            f"Use /create to try again.",
+            f"❌ **Error** \n\n`{str(e)}`\n\nUse /create",
             parse_mode='Markdown'
         )
         
-        # Cleanup
         creator = context.user_data.get('creator')
         if creator:
             try:
@@ -730,91 +592,85 @@ Enjoy your new Facebook account! 🚀
 
 
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /cancel command - cancel ongoing operation."""
+    """Handle /cancel command."""
     
     creator = context.user_data.get('creator')
     
     if creator:
-        await update.message.reply_text(
-            "⏳ Cancelling and cleaning up...",
-        )
+        await update.message.reply_text("⏳ Cancelling...")
         
         try:
             await creator.cleanup()
         except Exception as e:
-            logger.error(f"Error during cancel cleanup: {e}")
+            logger.error(f"Cancel cleanup error: {e}")
         
         del context.user_data['creator']
         
         await update.message.reply_text(
-            "❌ **Operation Cancelled** \n\n"
-            "Browser closed and session cleared.\n\n"
-            "Use /create to start a new account creation.",
+            "❌ **Cancelled** \n\nUse /create to start new",
             parse_mode='Markdown'
         )
     else:
-        await update.message.reply_text(
-            "ℹ️ No ongoing operation to cancel.\n\n"
-            "Use /create to start creating an account.",
-        )
+        await update.message.reply_text("ℹ️ Nothing to cancel.\n\nUse /create")
     
     return ConversationHandler.END
 
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle errors in the bot."""
+    """Handle errors."""
     logger.error(f"Update {update} caused error {context.error}", exc_info=context.error)
     
     try:
         if update and update.effective_message:
             await update.effective_message.reply_text(
-                "❌ An unexpected error occurred.\n"
-                "Please try again with /create or contact support."
+                "❌ Unexpected error.\nTry /create again."
             )
     except:
         pass
 
 
 def main():
-    """Main function to run the bot."""
+    """Main function."""
     
-    # Get token from environment
+    # Start Flask in background
+    flask_thread = Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    logger.info("🌐 Flask server started on port " + os.getenv('PORT', '8080'))
+    
     token = os.getenv('TELEGRAM_BOT_TOKEN')
     
     if not token:
-        logger.error("❌ TELEGRAM_BOT_TOKEN not found in environment variables!")
-        logger.error("Please create a .env file with your bot token.")
+        logger.error("❌ TELEGRAM_BOT_TOKEN not found!")
         return
     
-    logger.info("🤖 Initializing Telegram Bot...")
+    if not os.path.exists('.env'):
+        os.environ['HEADLESS'] = 'true'
     
-    # Create application
+    logger.info("🤖 Initializing Bot...")
+    
     application = Application.builder().token(token).build()
     
-    # Create conversation handler for account creation flow
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('create', create_command)],
         states={
-            WAITING_PHONE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_phone)
-            ],
-            WAITING_OTP: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_otp)
-            ],
+            WAITING_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_phone)],
+            WAITING_OTP: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_otp)],
         },
         fallbacks=[CommandHandler('cancel', cancel_command)],
         allow_reentry=True,
     )
     
-    # Add command handlers
     application.add_handler(CommandHandler('start', start_command))
     application.add_handler(CommandHandler('help', help_command))
     application.add_handler(conv_handler)
-    
-    # Add error handler
     application.add_error_handler(error_handler)
     
-    # Start bot
-    logger.info("✅ Bot started successfully!")
-    logger.info("🚀 Ready to create Facebook accounts!")
-    logger.info("Press Ctrl+C to stop
+    logger.info("✅ Bot started!")
+    logger.info("🚀 Ready to create accounts!")
+    logger.info("Press Ctrl+C to stop")
+    
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+
+if __name__ == '__main__':
+    main()
